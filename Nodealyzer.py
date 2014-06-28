@@ -7,7 +7,7 @@
 # License: GPL v3 (http://www.gnu.org/licenses/gpl.html)
 
 #Import needed libraries
-import ConfigParser, pyzmail, base64, datetime
+import ConfigParser, pyzmail, base64, datetime, os, re, pprint
 
 #Read configuration file
 config = ConfigParser.ConfigParser()
@@ -17,19 +17,34 @@ config.read("config.ini")
 def main():
 
 	#Perform Preflight Checks
-	print "Performing Preflight Checks..."
+	#print "Performing Preflight Checks..."
 	#TODO: Confirm valid values in the config file
 
 	#Get some initial info
-	print "Gathering Info..."
+	#print "Gathering Info..."
 	
 	#Let's Backup some databases!
 	print "Backing up MySQL Databases..."
+	print backupDatabases()
 	
 	#Send the email report
-	print "Sending Email report...",
-	print sendEmail()
+	#print "Sending Email report...",
+	#print sendEmail()
 
+#Backup the databases
+def backupDatabases():
+	pwd = os.path.dirname(os.path.realpath(__file__))
+	backup_dir = pwd + "/SQL_Backups/"
+	
+	#Iterate through each database that must be backed up
+	db_descriptions = re.compile('\s*,\s*').split(config.get('MySQL', 'descriptions'))
+	db_names        = re.compile('\s*,\s*').split(config.get('MySQL', 'names'))
+	db_hosts        = re.compile('\s*,\s*').split(config.get('MySQL', 'hosts'))
+	db_usernames    = re.compile('\s*,\s*').split(config.get('MySQL', 'usernames'))
+	db_passwords    = re.compile('\s*,\s*').split(config.get('MySQL', 'passwords'))
+	##for db in db_descriptions:
+	#TODO: Finish me
+	
 #Generate and send the Email
 def sendEmail():
 
@@ -79,6 +94,14 @@ def sendEmail():
 	else:
 		return 'Error:', ret
 	
+#Database Class
+class database:
+	def __init__(self, description, name, host, username, password):
+		self.description = description
+		self.name        = name
+		self.host        = host
+		self.username    = username
+		self.password    = password
 	
 #Run the Main function when this python script is executed
 if __name__ == '__main__':
