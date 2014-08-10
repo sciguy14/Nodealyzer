@@ -28,6 +28,16 @@ def main():
         #We'll fill in the email report body as we go
         email_body = ""
 
+        #We'll use this to report a high level good/bad summary at the top of the email
+        all_good = True
+        status_reports = "<h3 style='margin:5px;'>Overview</h3>\n<table>\n"
+
+        #String Constants
+        PASS_STYLED = "<td align='left'><font color='green'><b>Pass</b></font></td>"
+        FAIL_STYLED = "<td align='left'><font color='red'><b>Fail</b></font></td>"
+        NA_STYLED   = "<td align='left'><font color='grey'><b>N/A</b></font></td>"
+        
+
         #DATABASES ---------------------------------
         email_body = email_body + "<h1>Database Backup</h1>"
 	
@@ -37,9 +47,12 @@ def main():
 	if success:
                 print "Success!"
                 email_body = email_body + "<p>The following MySQL databases were backed up successfully:</p>\n"
+                status_reports = status_reports + "\t<tr align='right'><td>Database Backups:</td>" + PASS_STYLED + "</tr>\n"
         else:
                 print "Failures Occurred!"
                 email_body = email_body + "<p>Errors occured while backing up MySQL databases:</p>\n"
+                status_reports = status_reports + "\t<tr align='right'><td>Database Backups:</td>" + FAIL_STYLED + "</tr>\n"
+                all_good = False
         print details
         email_body = email_body + html
         print ""
@@ -50,9 +63,12 @@ def main():
 	if success:
                 print "Success!"
                 email_body = email_body + "<p>Long-term archives were successfully created if due:</p>\n"
+                status_reports = status_reports + "\t<tr align='right'><td>Database Archivals:</td>" + PASS_STYLED + "</tr>\n"
         else:
                 print "Failures Occurred!"
                 email_body = email_body + "<p>Errors occured while checking or creating long-term archives:</p>\n"
+                status_reports = status_reports + "\t<tr align='right'><td>Database Archivals:</td>" + FAIL_STYLED + "</tr>\n"
+                all_good = False
         print details
         email_body = email_body + html
         print ""
@@ -65,15 +81,19 @@ def main():
                 if success:
                         print "Success!"
                         email_body = email_body + "<p>Daily backups older than " + str(num_daily_backups) + " days deleted if needed:</p>\n"
+                        status_reports = status_reports + "\t<tr align='right'><td>Daily Backup Cleaning:</td>" + PASS_STYLED + "</tr>\n"
                 else:
                         print "Failures Occurred!"
                         email_body = email_body + "<p>Errors occured while trying to delete daily backups:</p>\n"
+                        status_reports = status_reports + "\t<tr align='right'><td>Daily Backup Cleaning:</td>" + FAIL_STYLED + "</tr>\n"
+                        all_good = False
                 print details
                 email_body = email_body + html
         else:
                 sys.stdout.write("Daily Backups Configured to not Expire...")
                 print "Moving On."
                 email_body = email_body + "<p>Daily backups have not been configured to expire.</p>\n"
+                status_reports = status_reports + "\t<tr align='right'><td>Daily Backup Cleaning:</td>" + NA_STYLED + "</tr>\n"
         print ""
 
         #Delete Old Archives
@@ -84,22 +104,27 @@ def main():
                 if success:
                         print "Success!"
                         email_body = email_body + "<p>Old archives deleted. "+ str(num_archives) + " kept:</p>\n"
+                        status_reports = status_reports + "\t<tr align='right'><td>Archive Cleaning:</td>" + PASS_STYLED + "</tr>\n"
                 else:
                         print "Failures Occurred!"
                         email_body = email_body + "<p>Errors occured while trying to delete archives:</p>\n"
+                        status_reports = status_reports + "\t<tr align='right'><td>Archive Cleaning:</td>" + FAIL_STYLED + "</tr>\n"
+                        all_good = False
                 print details
                 email_body = email_body + html
         else:
                 sys.stdout.write("Archives Configured to not Expire...")
                 print "Moving On."
                 email_body = email_body + "<p>Archives have not been configured to expire.</p>\n"
+                status_reports = status_reports + "\t<tr align='right'><td>Archive Cleaning:</td>" + NA_STYLED + "</tr>\n"
         print ""
 
         #END DATABASES -----------------------------
         
 	#Send the email report
+        status_reports = status_reports + "</ul>"
 	sys.stdout.write("Sending Email report...")
-	print sendEmail(email_body)
+	print sendEmail(status_reports, email_body)
 
         print ""
         print "All Done!"
@@ -293,7 +318,7 @@ def deleteBackups(backup_type, num_to_maintain):
         
 	
 #Generate and send the Email
-def sendEmail(body):
+def sendEmail(overview, body):
 
 	#encoded inline image
 	logo=base64.b64decode(	"""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
@@ -312,7 +337,7 @@ def sendEmail(body):
 	html_content = html_content.replace('[DATE_TIME]', datetime_string)
 	html_content = html_content.replace('[TITLE]', 'Daily Nodealyzer Report')
 	html_content = html_content.replace('[SUBTITLE]', config.get('ServerInfo','friendly_server_name'))
-	html_content = html_content.replace('[PANEL]', 'Eventually, a high-level summary will go here.')
+	html_content = html_content.replace('[PANEL]', overview)
 	html_content = html_content.replace('[BODY]', body)
 	html_content = html_content.replace('[FOOTER]', 'Generated by <a href="https://www.github.com/sciguy14/Nodealyzer" title="Nodealyzer on GitHub">Nodealyzer</a>')
 	
