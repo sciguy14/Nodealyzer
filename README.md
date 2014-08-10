@@ -13,6 +13,10 @@ Prepare the Configuration File
 * Rename "config_sample.ini" to "config.ini".
 * stuff
 
+Install the Linux Prerequisites
+-------------------------------
+sudo apt-get install logwatch
+
 Install the Python Prerequisites
 --------------------------------
 * Install Python 2.7 if don't already have it installed: sudo apt-get install python2.7

@@ -61,30 +61,38 @@ def main():
         num_daily_backups = int(config.get('MySQL','num_daily_backups'))
         if num_daily_backups > 0:
                 sys.stdout.write("Trimming Daily Backups to the " + str(num_daily_backups) + " most recent...")
-                [success, details] = deleteBackups('daily', num_daily_backups)
+                [success, details, html] = deleteBackups('daily', num_daily_backups)
                 if success:
                         print "Success!"
+                        email_body = email_body + "<p>Daily backups older than " + str(num_daily_backups) + " days deleted if needed:</p>\n"
                 else:
                         print "Failures Occurred!"
+                        email_body = email_body + "<p>Errors occured while trying to delete daily backups:</p>\n"
                 print details
+                email_body = email_body + html
         else:
                 sys.stdout.write("Daily Backups Configured to not Expire...")
                 print "Moving On."
+                email_body = email_body + "<p>Daily backups have not been configured to expire.</p>\n"
         print ""
 
         #Delete Old Archives
         num_archives = int(config.get('MySQL','num_archives'))
         if num_archives > 0:
                 sys.stdout.write("Trimming Archives to the " + str(num_archives) + " most recent...")
-                [success, details] = deleteBackups('archive', num_archives)
+                [success, details, html] = deleteBackups('archive', num_archives)
                 if success:
                         print "Success!"
+                        email_body = email_body + "<p>Old archives deleted. "+ str(num_archives) + " kept:</p>\n"
                 else:
                         print "Failures Occurred!"
+                        email_body = email_body + "<p>Errors occured while trying to delete archives:</p>\n"
                 print details
+                email_body = email_body + html
         else:
                 sys.stdout.write("Archives Configured to not Expire...")
                 print "Moving On."
+                email_body = email_body + "<p>Archives have not been configured to expire.</p>\n"
         print ""
 
         #END DATABASES -----------------------------
@@ -231,7 +239,7 @@ def deleteBackups(backup_type, num_to_maintain):
         backup_dir = os.path.dirname(os.path.realpath(__file__)) + "/SQL_Backups/"
 	all_success = True
 	details = ""
-
+        html = "<ul>\n"
         #Which kinds of backups are we cleaning?
         if backup_type == 'daily':
                 suffix = "/"
@@ -240,12 +248,13 @@ def deleteBackups(backup_type, num_to_maintain):
         else:
                 all_success = False
                 details = details + "Invalid backup type specified for cleaning.\n"
-
+                html = html + "\t<li>The specified backup type was invalid.</li>\n"
 	if all_success:
                 #Iterate through the database backup folders
                 backup_folders = sorted(os.listdir(backup_dir))
                 if not backup_folders:
                         details = details + "No database backups were found for cleaning.\n"
+                        html = html + "\t<li>No database backups were found for cleaning.</li>\n"
                 else:
                         for name in backup_folders:
                                 if os.path.isfile(name): pass
@@ -253,7 +262,8 @@ def deleteBackups(backup_type, num_to_maintain):
                                         cleaning_dir = backup_dir + name + suffix
                                         #Make sure folder exists
                                         if backup_type == 'archive' and not os.path.exists(cleaning_dir):
-                                                details = details + "Archive directory not found for SQL_Backups/" + name + suffix + "\n"
+                                                details = details + "Archive directory not found for SQL_Backups/" + name + suffix + ".\n"
+                                                html = html + "\t<li>Archive directory not found for SQL_Backups/" + name + suffix + ".</li>\n"
                                                 all_success = False
                                         else:
                                                 #List out the files so we can find expired ones
@@ -261,8 +271,10 @@ def deleteBackups(backup_type, num_to_maintain):
                                                 backups = filter(os.path.isfile, [os.path.join(cleaning_dir, backup) for backup in backups])
                                                 if not backups:
                                                         details = details + "No backups found for cleaning in SQL_Backups/" + name + suffix + ".\n"
+                                                        html = html + "\t<li>No backups found for cleaning in SQL_Backups/" + name + suffix + ".</li>\n"
                                                 elif len(backups) <= num_to_maintain:
                                                         details = details + str(num_to_maintain) + " or fewer backups exist in in SQL_Backups/" + name + suffix + ". No cleaning needed.\n"
+                                                        html = html + "\t<li>" + str(num_to_maintain) + " or fewer backups exist in in SQL_Backups/" + name + suffix + ". No cleaning needed.</li>\n"
                                                 else:
                                                         for backup in backups[0:len(backups)-num_to_maintain]:
                                                                 try:
@@ -270,11 +282,14 @@ def deleteBackups(backup_type, num_to_maintain):
                                                                 except:
                                                                         all_success = False
                                                                         details = details + "Could not delete " + backup + ".\n"
+                                                                        html = html + "\t<li>Could not delete " + backup + ".</li>\n"
                                                                 else:
                                                                         details = details + "Deleted backup " + backup + ".\n"
+                                                                        html = html + "\t<li>Deleted backup " + backup + ".</li>\n"
 
-        details = details.strip('\n') 
-        return [all_success, details]
+        details = details.strip('\n')
+        html = html + "</ul>\n"
+        return [all_success, details, html]
         
 	
 #Generate and send the Email
