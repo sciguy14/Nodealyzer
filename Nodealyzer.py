@@ -120,6 +120,27 @@ def main():
         print ""
 
         #END DATABASES -----------------------------
+
+        #LOG FILE ANALYSIS -------------------------
+        email_body = email_body + "<h1>Log Files</h1>"
+
+        #Let's check the Apache Logs!
+	sys.stdout.write("Querying Apache Logs...")
+	[success, details, html] = backupDatabases()
+	if success:
+                print "Success!"
+                email_body = email_body + "<p>The following MySQL databases were backed up successfully:</p>\n"
+                status_reports = status_reports + "\t<tr align='right'><td>Database Backups:</td>" + PASS_STYLED + "</tr>\n"
+        else:
+                print "Failures Occurred!"
+                email_body = email_body + "<p>Errors occured while backing up MySQL databases:</p>\n"
+                status_reports = status_reports + "\t<tr align='right'><td>Database Backups:</td>" + FAIL_STYLED + "</tr>\n"
+                all_good = False
+        print details
+        email_body = email_body + html
+        print ""
+        
+        #END LOG FILE ANALYSIS ---------------------
         
 	#Send the email report
         status_reports = status_reports + "</ul>"
