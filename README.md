@@ -35,10 +35,14 @@ Configure Rsync on the machine that will be receiving the backups (Backup Machin
     * scp ~/.ssh/id_rsa.pub user@hostname.com:/home/user/.ssh/uploaded_key.pub
 	* ssh user@hostname.com "echo `cat ~/.ssh/uploaded_key.pub` >> ~/.ssh/authorized_keys"
 
+	
 TODO: Complete this documentation
 Git clone my repo
 make the program executable: chmod 755 Nodealyzer.py
 Setup a cron job
+#Daily Nodealyzer Run
+0 1 * * * /home/jeremy/Nodealyzer/Nodealyzer.py > /dev/null
+
 
 License
 =======

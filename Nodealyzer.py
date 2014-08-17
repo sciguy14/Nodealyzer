@@ -9,12 +9,12 @@
 #Import needed libraries
 import ConfigParser, pyzmail, base64, datetime, time, os, re, pprint, subprocess, gzip, sys, shutil, glob
 
-#Read configuration file
-config = ConfigParser.ConfigParser()
-config.read("config.ini")
-
 #Know Script Directory so we can make absolute references
 script_dir = os.path.dirname(os.path.realpath(__file__))
+
+#Read configuration file
+config = ConfigParser.ConfigParser()
+config.read(script_dir + "/config.ini")
 
 #Main program execution
 def main():
@@ -438,7 +438,7 @@ def sendEmail(overview, body, log_file_attachments):
 	
 	#Create Email Template
 	text_content=u'Daily Nodealyzer Report Content'
-	with open ("email_template_inlined.html", "r") as template:
+	with open (script_dir + "/email_template_inlined.html", "r") as template:
 		html_content=template.read().replace('\n', '')
 	
 	#Fill in Template Information
