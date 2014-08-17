@@ -13,6 +13,9 @@ import ConfigParser, pyzmail, base64, datetime, time, os, re, pprint, subprocess
 config = ConfigParser.ConfigParser()
 config.read("config.ini")
 
+#Know Script Directory so we can make absolute references
+script_dir = os.path.dirname(os.path.realpath(__file__))
+
 #Main program execution
 def main():
 
@@ -27,6 +30,9 @@ def main():
 
         #We'll fill in the email report body as we go
         email_body = ""
+
+        #We'll add locations of log files to attach to this list:
+        log_file_attachments = []
 
         #We'll use this to report a high level good/bad summary at the top of the email
         all_good = True
@@ -121,12 +127,38 @@ def main():
 
         #END DATABASES -----------------------------
 
+        #RSYNC -------------------------------------
+        email_body = email_body + "<h1>Remote Sync</h1>"
+	
+	#Let's Syncronize!
+	sys.stdout.write("Performing Remote Sync...")
+	[success, details, html] = rsync()
+	if success:
+                print "Success!"
+                email_body = email_body + "<p>Files were backed up to " + config.get('RSync','backup_server_fqdn') + "! "
+                status_reports = status_reports + "\t<tr align='right'><td>Remote Data Backup:</td>" + PASS_STYLED + "</tr>\n"
+        else:
+                print "Failures Occurred!"
+                email_body = email_body + "<p>Errors occured while backing up to " + config.get('RSync','backup_server_fqdn') + ". "
+                status_reports = status_reports + "\t<tr align='right'><td>Remote Data Backup:</td>" + FAIL_STYLED + "</tr>\n"
+                all_good = False
+        if os.path.isfile(script_dir + '/rsync.log'):
+                email_body = email_body + "A log file is attached.</p>\n"
+                log_file_attachments.append(script_dir + '/rsync.log')
+        else:
+                email_body = email_body + "A log file could not be generated.</p>\n"
+        print details
+        email_body = email_body + html
+        print ""
+        #END RSYNC ---------------------------------
+
         #LOG FILE ANALYSIS -------------------------
+        '''
         email_body = email_body + "<h1>Log Files</h1>"
 
         #Let's check the Apache Logs!
 	sys.stdout.write("Querying Apache Logs...")
-	[success, details, html] = backupDatabases()
+	[success, details, html] = logParse()
 	if success:
                 print "Success!"
                 email_body = email_body + "<p>The following MySQL databases were backed up successfully:</p>\n"
@@ -139,20 +171,21 @@ def main():
         print details
         email_body = email_body + html
         print ""
-        
+        '''
         #END LOG FILE ANALYSIS ---------------------
         
 	#Send the email report
         status_reports = status_reports + "</ul>"
 	sys.stdout.write("Sending Email report...")
-	print sendEmail(status_reports, email_body)
+	#TODO: More generic file attach for logs
+	print sendEmail(status_reports, email_body, log_file_attachments)
 
         print ""
         print "All Done!"
 
 #Backup the databases
 def backupDatabases():
-	backup_dir = os.path.dirname(os.path.realpath(__file__)) + "/SQL_Backups/"
+	backup_dir = script_dir + "/SQL_Backups/"
 
 	suffix = time.strftime('%Y-%m-%d_%H-%M-%S')
 
@@ -206,7 +239,7 @@ def backupDatabases():
 
 #Clean old backups and add to the archive
 def updateArchives(archival_frequency):
-        backup_dir = os.path.dirname(os.path.realpath(__file__)) + "/SQL_Backups/"
+        backup_dir = script_dir + "/SQL_Backups/"
 	all_success = True
 	details = ""
 	html = "<ul>\n"
@@ -282,7 +315,7 @@ def updateArchives(archival_frequency):
 #backup_type = "daily" or "archive"
 #num_to_maintain = the number of the selected backups to hold on to
 def deleteBackups(backup_type, num_to_maintain):
-        backup_dir = os.path.dirname(os.path.realpath(__file__)) + "/SQL_Backups/"
+        backup_dir = script_dir + "/SQL_Backups/"
 	all_success = True
 	details = ""
         html = "<ul>\n"
@@ -336,10 +369,63 @@ def deleteBackups(backup_type, num_to_maintain):
         details = details.strip('\n')
         html = html + "</ul>\n"
         return [all_success, details, html]
+
+#Run RSync
+def rsync():
+        b_user = config.get('RSync','backup_server_username')
+        b_port = config.get('RSync','backup_server_ssh_port')
+        b_fqdn = config.get('RSync','backup_server_fqdn')
+        b_rdir = config.get('RSync','backup_server_remote_directory')
+        b_ldir = config.get('RSync','directories_to_backup')
+
+	all_success = True
+	details = ""
+	html = "<p>\n"
+
+        #Delete Old Log and Run RSync
+        cmd = ('rm ' + script_dir + '/rsync.log; '
+               'rsync '
+               '--progress '
+               '--relative '
+               '--archive '
+               '--compress '
+               '--human-readable '
+               '--stats '
+               '--delete '
+               '--log-file=' + script_dir + '/rsync.log '
+               '-e "ssh -l ' + b_user + ' -p ' + b_port + '" '
+               '' + b_ldir + ' ' + b_fqdn + ':' + b_rdir)
+        p1 = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Poll process for new output until finished
+        save_output = False
+        stats = ""
+        while True:
+                nextline = p1.stdout.readline()
+                if nextline == '' and p1.poll() != None:
+                        break
+                #Once we get to the stats, we want to save those for the email
+                if "Number of files: " in nextline or save_output == True:
+                        save_output = True
+                        stats = stats + nextline
+                else:
+                        sys.stdout.write(nextline)
+                        sys.stdout.flush()
+        err = p1.communicate()[1]
+        if p1.returncode is not 0:
+                details = details + err
+                all_success = False
+        else:
+                details = details + "\n" + stats
+                stats_cleaned_up = stats.strip('\n').replace('\n\n','\n').replace('\n', '<br />')
+                html = html + stats_cleaned_up
+                
+        details = details.strip('\n')
+        html = html + "</p>\n"
         
-	
+        return [all_success, details, html]
+
 #Generate and send the Email
-def sendEmail(overview, body):
+def sendEmail(overview, body, log_file_attachments):
 
 	#encoded inline image
 	logo=base64.b64decode(	"""R0lGODlhMgAyAPcAAAAAAP///yCQkCCPjyKRkSSRkSaTkyaSkieUlCeTkyiUlCiTkymVlSmUlCqVlSqUlCuVlSyWliyVlS2Wli6Xly6Wli+XlzCYmC+WljCXlzGYmDKZmTKYmDOZmTSamjWbmzSZmTWamjabmzaamjebmzicnDqdnTqcnDudnTyenjydnT+fn0CgoEKhoUOiokKgoEOhoUSiokWjo0ShoUajo0Wiokaiokejo0mkpEqlpUqkpEulpUympk2mpk6np06mpk+np1Cnp1GoqFKpqVKoqFOpqVSqqlOoqFSpqVarq1WqqlaqqlisrFerq1msrFqtrVutrVyurl2urlytrV6vr1+wsF+vr16urmCwsGCvr2KxsWKwsGOxsWSxsWazs2Wysmaysmi0tGezs2izs2q1tWm0tGu1tW63t222tm62tnC4uG+3t3C3t3G4uHK4uHG3t3S6unO5uXa7u3W6une7u3m8vHy+vn6/v32+vn6+vn+/v4LAwIbDw4vFxYzFxY7Hx43GxpDIyJHIyJDHx5LIyJXKypjMzJfLy5nMzJzOzpvNzZ3OzqDQ0J/Pz6DPz6PR0aLQ0KTR0abT06XS0qbS0qvV1arU1K3W1qzV1a/X167W1rDX17LY2LTa2rfb27ba2rfa2rnc3Ljb27ze3rvd3bzd3cDg4L/f38Hg4MPh4cTi4sXi4sjk5Mfj48bi4srl5cvl5crk5M/o6M7n583m5s/n59Ho6NDn59Pp6dLo6NTp6dbr69js7Nfr69rt7dns7Nzu7tvt7d7v793u7tzt7eDw8N/v797u7uDv7+Lx8eHw8OTy8uLw8OTx8eby8ur19en09Ojz8+z29uv19e329u/39/L5+fH4+PP5+fb7+/X6+vj8/Pf7+/n8/Pz+/vv9/f7///3+/v7+/v///wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACH5BAEAAOMALAAAAAAyADIAAAj/ADtsGEiwoMGDCBMqJCiwg8OHECNKnEix4sOBFjNq3OgQI8ePIDtuCElyo8eSKCeeTMlSZMuXAkfCZLnyoYQHOC08BEHhQQUQECE84KDhQQSHPI06FJpBpUyIGp6MCfNlRQWHGXqMAdJUoIcsY0ysGONEQ4cMPsYYkUDhypgYFyTW3CBBVoC7wGroPLAowKMEDjWUiBZAiJYAryB0MMAogLUdZMAFkNNA7tOOEmAF2PMoABwFHQ4gCtAIcAfBzAIEwRJglWIDie4ee3YXTuWIcyW8CkCMthzQokkfGIk6AJAqrV/HvsvctmXcugPYOpVtGAkNwRcRiCu4WQAdUQK0/1IegNY2aMQ834aYW3OfMtS+tbAQHBqtQRA2UKgVwFSsAJuABlsAguRhBinqPcdeXcwFoMhRfDH3CQIdQCCGNndBI8QEizXGyAAH7EaZglBJFUYYTFgwUlZjtEhEXBUuUYggOUAAFFpj+GCBBk68BSN7l9mE0wMSyJQUThMA5VAEBiRwFVI9UQBUBA90hVuQM4VU01INXKAkBw0ooAAEHEAEwgQNpNlAmTtVkKZZFG2pQRdw2NCUBirAQYccVligE1ZTwCGoGyjA2YEFQMARR6FxBrnBBLoE8EZlE/jQYCjXOdSAJw0CcZSmo9xFxwKN4jYBLQGkQWkP3XTjijUOgv/WQQOctHaIISzAaEENsAYwynpXmoqqqh1M0IM300BwRgC/EDVrrdUk84sLfyaQRwDLYIONDBg4JWyqq3ojzQd4BLBLBmXSGoAvo3iSq0AQpBJAKccEoIdpwbJ3KrjFsvpNMOIEAMht6tqCySV6dVBBDtk06BqWc02ASwBsUPpDwAFs84gGcDYASoNHHJUAIAHw4gYf4ajGYb5QQTHGC9ydAMYYYgThgKEXINHiGF6YYFYGTZjhQwEOWFEGDD9ehGUHN/3IwZArQzTBkEMhhWaSFT5gKJBZprRlBxFAsLVDHEAAwZ8PUWD22RFp0ECTinkbkQdNUIECmx2NEAUVNfz/eMEOVFAhxQtRa+CBHITwwcXSNWlAgjIBOCEBRA+EcZco6yUgCXPOJLHyBJowN0vcLAdGQjGRT/5QApfcdQ0M1VISwCV9OGiAwjuE040jjbRBOtdQkWBM6g9lkMIz3VATgB2kdpDAJAEg00sAhtxOwQ3dmJvJFlED/5Djww9RQMdqRN9JAKg44NDzATjDSjXV7ECBwmuEMkwA3PAwf+mnkVDvLalQAocU8IkGaQMHV2FfJYqQiwBYQTETQMMfAoGNAFzhdy4J3jKYIwYGWIAG2YNEH4QRAD8AxgCWaJAqQqCBDUSAF8zRhQjGFhPceKAMgoJDCy5wgRnUQQ0REAARW+AghaZYoAmCmkMZSKCTkdwhEpU4xA32xz+HOEBNcNKAAhqwgTM1AGteTJPWINKABCggAVKSW9dI8rU1aqSNbrQIHONYKjp+ZI52rGIe67jHjIxkIYAMpCAxEhAAOw==
@@ -361,6 +447,13 @@ def sendEmail(overview, body):
 	html_content = html_content.replace('[PANEL]', overview)
 	html_content = html_content.replace('[BODY]', body)
 	html_content = html_content.replace('[FOOTER]', 'Generated by <a href="https://www.github.com/sciguy14/Nodealyzer" title="Nodealyzer on GitHub">Nodealyzer</a>')
+
+        #Generate Log File attachment list
+        attachment_list = []
+        for filename in log_file_attachments:
+                with open (filename, "r") as attachment_file:
+                        attachment_text=attachment_file.read()
+                attachment_list.append([attachment_text, 'text', 'plain', filename, 'us-ascii'])
 	
 	payload, mail_from, rcpt_to, msg_id=pyzmail.compose_mail(\
         (config.get('ServerInfo','friendly_server_name'), config.get('ServerInfo','server_email')), \
@@ -369,7 +462,8 @@ def sendEmail(overview, body):
         'iso-8859-1', \
         (text_content, 'iso-8859-1'), \
         (html_content, 'iso-8859-1'), \
-        embeddeds=[(logo, 'image', 'gif', 'logo', None), ])
+        embeddeds=[(logo, 'image', 'gif', 'logo', None)], \
+        attachments=attachment_list )
 
 	ret=pyzmail.send_mail(payload, mail_from, rcpt_to, config.get('ServerInfo','smtp_host'), \
         smtp_port=config.get('ServerInfo','smtp_port'), smtp_mode=config.get('ServerInfo','smtp_mode'), \
@@ -383,14 +477,6 @@ def sendEmail(overview, body):
 	else:
 		return 'Error:', ret
 	
-#Database Class
-class database:
-	def __init__(self, description, name, host, username, password):
-		self.description = description
-		self.name        = name
-		self.host        = host
-		self.username    = username
-		self.password    = password
 	
 #Run the Main function when this python script is executed
 if __name__ == '__main__':
