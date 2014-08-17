@@ -383,7 +383,7 @@ def rsync():
 	html = "<p>\n"
 
         #Delete Old Log and Run RSync
-        cmd = ('rm ' + script_dir + '/rsync.log; '
+        cmd = ('rm -f ' + script_dir + '/rsync.log; '
                'rsync '
                '--progress '
                '--relative '
@@ -392,6 +392,7 @@ def rsync():
                '--human-readable '
                '--stats '
                '--delete '
+               '--exclude-from=' + script_dir + '/rsync_exclusions.txt ' + ' '
                '--log-file=' + script_dir + '/rsync.log '
                '-e "ssh -l ' + b_user + ' -p ' + b_port + '" '
                '' + b_ldir + ' ' + b_fqdn + ':' + b_rdir)
@@ -413,6 +414,7 @@ def rsync():
         err = p1.communicate()[1]
         if p1.returncode is not 0:
                 details = details + err
+                html = html + err.replace('\n','<br />')
                 all_success = False
         else:
                 details = details + "\n" + stats

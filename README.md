@@ -11,13 +11,13 @@ What you'll need
 Prepare the Configuration File
 ------------------------------
 * Rename "config_sample.ini" to "config.ini".
+* Rename "rsync_exclusions_sample.txt" to "rsync_exclusions.txt"
 * stuff
 
 Install the Linux Prerequisites
 -------------------------------
 sudo apt-get install logwatch
 sudo apt-get install rsync
-sudo apt-get install rsnapshot
 
 
 Install the Python Prerequisites

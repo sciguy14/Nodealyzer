@@ -2,3 +2,4 @@ config.ini
 email_template.html
 legacy/*
 notes.txt
+rsync_exclusions.txt

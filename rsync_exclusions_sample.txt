@@ -1,0 +1,3 @@
+*/wp-content/cache/*
+/home/username/.*
+/some/other/file
