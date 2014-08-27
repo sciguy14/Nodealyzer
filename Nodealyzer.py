@@ -80,6 +80,7 @@ def main():
         print ""
 
         #Delete Old Daily Backups
+        #TODO: Should do this by date instead of number
         num_daily_backups = int(config.get('MySQL','num_daily_backups'))
         if num_daily_backups > 0:
                 sys.stdout.write("Trimming Daily Backups to the " + str(num_daily_backups) + " most recent...")
