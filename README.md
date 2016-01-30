@@ -28,12 +28,13 @@ Install the Python Prerequisites
 
 Configure Rsync on the machine that will be receiving the backups (Backup Machine)
 ----------------------------------------------------------------------------------
-* SSH into the backup machine (or log on directly if it is local)
+* SSH into the Server that you are backing up
 * Run `ssh-keygen`
 * An ssh private key will be generated at `~/.ssh/id_rsa` and a public key will be generated at `~/.ssh/id_rsa.pub`
-* Use secure copy to send the public key to your Server to be backed up:
-    * scp ~/.ssh/id_rsa.pub user@hostname.com:/home/user/.ssh/uploaded_key.pub
-	* ssh user@hostname.com "echo `cat ~/.ssh/uploaded_key.pub` >> ~/.ssh/authorized_keys"
+* Use secure copy to send the public key to your Backup machine (The first two commands will ask for your backup machine password. The last command will not, because it can authenticate via the authorized public key that you just installed.)
+    * scp -P REMOTE_SSH_PORT_NUM ~/.ssh/id_rsa.pub USER@HOSTNAME.com:/home/REMOTE_USER/.ssh/uploaded_key.pub
+	* ssh -p REMOTE_SSH_PORT_NUM user@hostname.com "cat ~/.ssh/uploaded_key.pub >> ~/.ssh/authorized_keys"
+	* ssh -p REMOTE_SSH_PORT_NUM user@hostname.com "rm ~/.ssh/uploaded_key.pub"
 
 	
 TODO: Complete this documentation
