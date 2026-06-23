@@ -42,7 +42,12 @@ def main():
         PASS_STYLED = "<td align='left'><font color='green'><b>Pass</b></font></td>"
         FAIL_STYLED = "<td align='left'><font color='red'><b>Fail</b></font></td>"
         NA_STYLED   = "<td align='left'><font color='grey'><b>N/A</b></font></td>"
-        
+        #Amber "succeeded but needed intervention" + red "skipped" statuses for backup-drive auto-recovery
+        PASS_STAR_STYLED = "<td align='left'><font color='#cc7a00'><b>Pass&#42;</b></font></td>"
+        REPAIR_STYLED    = "<td align='left'><font color='#cc7a00'><b>Repaired</b></font></td>"
+        REMOUNT_STYLED   = "<td align='left'><font color='#cc7a00'><b>Remounted</b></font></td>"
+        SKIPPED_STYLED   = "<td align='left'><font color='red'><b>Fail (SKIPPED)</b></font></td>"
+
 
         #DATABASES ---------------------------------
         email_body = email_body + "<h1>Database Backup</h1>"
@@ -80,7 +85,6 @@ def main():
         print ""
 
         #Delete Old Daily Backups
-        #TODO: Should do this by date instead of number
         num_daily_backups = int(config.get('MySQL','num_daily_backups'))
         if num_daily_backups > 0:
                 sys.stdout.write("Trimming Daily Backups to the " + str(num_daily_backups) + " most recent...")
@@ -130,26 +134,83 @@ def main():
 
         #RSYNC -------------------------------------
         email_body = email_body + "<h1>Remote Sync</h1>"
-	
-	#Let's Syncronize!
-	sys.stdout.write("Performing Remote Sync...")
-	[success, details, html] = rsync()
-	if success:
-                print "Success!"
-                email_body = email_body + "<p>Files were backed up to " + config.get('RSync','backup_server_fqdn') + "! "
-                status_reports = status_reports + "\t<tr align='right'><td>Remote Data Backup:</td>" + PASS_STYLED + "</tr>\n"
-        else:
-                print "Failures Occurred!"
-                email_body = email_body + "<p>Errors occured while backing up to " + config.get('RSync','backup_server_fqdn') + ". "
-                status_reports = status_reports + "\t<tr align='right'><td>Remote Data Backup:</td>" + FAIL_STYLED + "</tr>\n"
+
+        #Pre-flight hard gate: confirm the backup drive is actually mounted on the
+        #Receiver before we rsync. If it's mounted with 'nofail' but absent, the
+        #mount point is just an empty directory on the Receiver's root disk, and
+        #rsync would silently fill the root filesystem. Never write into that.
+        sys.stdout.write("Checking that the backup drive is mounted on the Receiver...")
+        [mount_outcome, mount_details, mount_html] = ensureRemoteDriveMounted()
+        if mount_outcome == 'ok':
+                print "Mounted."
+                status_reports = status_reports + "\t<tr align='right'><td>Backup Drive Mounted:</td>" + PASS_STYLED + "</tr>\n"
+        elif mount_outcome == 'remounted':
+                print "Was unmounted; remounted before backup."
+                status_reports = status_reports + "\t<tr align='right'><td>Backup Drive Mounted:</td>" + REMOUNT_STYLED + "</tr>\n"
+        else:  #blocked
+                print "NOT MOUNTED and could not remount - skipping backup!"
+                status_reports = status_reports + "\t<tr align='right'><td>Backup Drive Mounted:</td>" + FAIL_STYLED + "</tr>\n"
+        print mount_details
+        email_body = email_body + mount_html
+
+        if mount_outcome == 'blocked':
+                #Hard stop: do NOT run rsync. Report the skip unmistakably and move on.
+                email_body = email_body + ("<p><b>&#9888; BACKUP SKIPPED</b> &mdash; the backup drive was NOT "
+                        "mounted on the Receiver and could not be remounted automatically. The sync was "
+                        "deliberately skipped to avoid writing into the unmounted mount point on the Receiver's "
+                        "root filesystem (which would silently fill it). <b>No files were backed up this run.</b> "
+                        "Mount the drive (and, if this was a permissions failure, follow the README instructions "
+                        "for enabling passwordless sudo for disk recovery on the Receiver), then re-run.</p>\n")
+                status_reports = status_reports + "\t<tr align='right'><td>Remote Data Backup:</td>" + SKIPPED_STYLED + "</tr>\n"
                 all_good = False
-        if os.path.isfile(script_dir + '/rsync.log'):
-                email_body = email_body + "A log file is attached.</p>\n"
-                log_file_attachments.append(script_dir + '/rsync.log')
         else:
-                email_body = email_body + "A log file could not be generated.</p>\n"
-        print details
-        email_body = email_body + html
+                #Let's Syncronize!
+                sys.stdout.write("Performing Remote Sync...")
+                [success, details, html] = rsync()
+
+                #If rsync failed, see whether it's a filesystem error we can safely auto-repair.
+                repair_outcome = 'not_needed'
+                repair_html = ""
+                if not success:
+                        sys.stdout.write("rsync reported errors; checking for an auto-repairable drive fault...")
+                        [repair_outcome, repair_details, repair_html] = repairRemoteBackupDrive(details)
+                        print repair_outcome
+                        print repair_details
+                        if repair_outcome == 'repaired':
+                                #Drive is repaired; re-run the sync once.
+                                sys.stdout.write("Drive auto-repaired; retrying Remote Sync...")
+                                [success, details, html] = rsync()
+
+                if success:
+                        print "Success!"
+                        if repair_outcome == 'repaired':
+                                email_body = email_body + "<p>Files were backed up to " + config.get('RSync','backup_server_fqdn') + " (after an automatic drive repair). "
+                                status_reports = status_reports + "\t<tr align='right'><td>Remote Data Backup:</td>" + PASS_STAR_STYLED + "</tr>\n"
+                        else:
+                                email_body = email_body + "<p>Files were backed up to " + config.get('RSync','backup_server_fqdn') + "! "
+                                status_reports = status_reports + "\t<tr align='right'><td>Remote Data Backup:</td>" + PASS_STYLED + "</tr>\n"
+                else:
+                        print "Failures Occurred!"
+                        email_body = email_body + "<p>Errors occured while backing up to " + config.get('RSync','backup_server_fqdn') + ". "
+                        status_reports = status_reports + "\t<tr align='right'><td>Remote Data Backup:</td>" + FAIL_STYLED + "</tr>\n"
+                        all_good = False
+                if os.path.isfile(script_dir + '/rsync.log'):
+                        email_body = email_body + "A log file is attached.</p>\n"
+                        log_file_attachments.append(script_dir + '/rsync.log')
+                else:
+                        email_body = email_body + "A log file could not be generated.</p>\n"
+                print details
+                email_body = email_body + html
+
+                #Report on any backup-drive auto-repair that took place.
+                if repair_outcome in ('not_needed', 'not_applicable'):
+                        status_reports = status_reports + "\t<tr align='right'><td>Backup Drive Repair:</td>" + NA_STYLED + "</tr>\n"
+                elif repair_outcome == 'repaired':
+                        status_reports = status_reports + "\t<tr align='right'><td>Backup Drive Repair:</td>" + REPAIR_STYLED + "</tr>\n"
+                else:  #permission_denied / skipped_unsafe / failed (rsync already marked Fail above)
+                        status_reports = status_reports + "\t<tr align='right'><td>Backup Drive Repair:</td>" + FAIL_STYLED + "</tr>\n"
+                if repair_html:
+                        email_body = email_body + "<h3 style='margin:5px;'>Backup Drive Repair</h3>\n" + repair_html
         print ""
         #END RSYNC ---------------------------------
 
@@ -426,6 +487,187 @@ def rsync():
         html = html + "</p>\n"
         
         return [all_success, details, html]
+
+#Run a command on the Receiver over the existing key-based SSH connection.
+#Returns (returncode, stdout, stderr). Privileged commands should be passed with
+#a leading 'sudo -n ' so a missing NOPASSWD rule fails fast (non-interactively)
+#instead of hanging a cron job waiting for a password.
+def _remote_ssh(command):
+	b_user = config.get('RSync','backup_server_username')
+	b_port = config.get('RSync','backup_server_ssh_port')
+	b_fqdn = config.get('RSync','backup_server_fqdn')
+	cmd = ['ssh', '-l', b_user, '-p', str(b_port),
+	       '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15',
+	       b_fqdn, command]
+	p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+	out, err = p.communicate()
+	return (p.returncode, out, err)
+
+#Whether the filesystem auto-recovery feature is enabled (defaults ON if the
+#config key is absent, so existing config.ini files keep working unchanged).
+def _autofix_enabled():
+	if config.has_option('RSync', 'autofix_filesystem'):
+		return config.get('RSync', 'autofix_filesystem').strip().lower() in ('1', 'true', 'yes', 'on')
+	return True
+
+#Did a remote 'sudo -n' command fail specifically because of missing privileges?
+def _is_sudo_permission_error(returncode, err):
+	if returncode == 0:
+		return False
+	low = err.lower()
+	return ('a password is required' in low or
+	        'a terminal is required' in low or
+	        'no tty present' in low or
+	        'not allowed to execute' in low or
+	        'is not in the sudoers' in low)
+
+#Resolve the backup drive's fstab mount point and backing device from the
+#configured rsync remote directory. Uses /etc/fstab as the source of truth, so
+#it works even while the drive is unmounted and never hardcodes /dev/sdX. Returns
+#(mountpoint, device), or (None, None) if the path is not an fstab-managed mount.
+def _resolve_backup_drive():
+	remote_dir = config.get('RSync','backup_server_remote_directory')
+	rc_m, mp_out, _  = _remote_ssh("findmnt --fstab -n -o TARGET --target " + remote_dir)
+	rc_d, dev_out, _ = _remote_ssh("findmnt --fstab -n -o SOURCE --target " + remote_dir)
+	mountpoint = mp_out.strip()
+	device = dev_out.strip()
+	if rc_m != 0 or rc_d != 0 or not mountpoint or not device.startswith('/dev/'):
+		return (None, None)
+	return (mountpoint, device)
+
+#Build the standard "we lack permission" result used whenever a recovery step
+#fails because passwordless sudo isn't configured on the Receiver.
+def _repair_permission_denied(details, html):
+	msg = ("We tried to auto-recover the remote backup drive, but don't have permission to do so. "
+	       "Follow the README instructions for enabling passwordless sudo for disk-recovery commands "
+	       "on the receiving machine.")
+	details = details + msg + "\n"
+	html = html + "<b>" + msg + "</b></p>\n"
+	return ['permission_denied', details.strip('\n'), html]
+
+#Pre-flight hard gate, run before rsync. Confirms the backup drive is mounted on
+#the Receiver; if not, tries to remount it. Returns [outcome, details, html] where
+#outcome is 'ok', 'remounted', or 'blocked'. On 'blocked' the caller MUST skip
+#rsync so we never write into an unmounted mount point on the Receiver's root fs.
+def ensureRemoteDriveMounted():
+	details = ""
+	html = "<p>\n"
+
+	mountpoint, device = _resolve_backup_drive()
+	if mountpoint is None:
+		#Fall back to the configured remote directory just for the mount check.
+		mountpoint = config.get('RSync','backup_server_remote_directory')
+
+	#Is it currently mounted?
+	rc, out, err = _remote_ssh("mountpoint -q " + mountpoint + " && echo MOUNTED || echo UNMOUNTED")
+	if 'MOUNTED' in out:
+		details = "Backup drive is mounted at " + mountpoint + "."
+		html = html + "Backup drive is mounted at " + mountpoint + ".</p>\n"
+		return ['ok', details, html]
+
+	#Not mounted - attempt a remount (relies on the Receiver's /etc/fstab entry).
+	details = details + "Backup drive is NOT mounted at " + mountpoint + ". Attempting to remount...\n"
+	rc, out, err = _remote_ssh("sudo -n mount " + mountpoint)
+	rc2, out2, err2 = _remote_ssh("mountpoint -q " + mountpoint + " && echo MOUNTED || echo UNMOUNTED")
+	if 'MOUNTED' in out2:
+		details = details + "Successfully remounted the backup drive at " + mountpoint + "."
+		html = html + ("Backup drive was not mounted; it was successfully remounted at "
+		        + mountpoint + " before the backup ran.</p>\n")
+		return ['remounted', details, html]
+
+	#Could not remount -> blocked. Surface why, prominently.
+	if _is_sudo_permission_error(rc, err):
+		why = ("We tried to remount the backup drive on the Receiver, but don't have permission to do so. "
+		       "Follow the README instructions for enabling passwordless sudo for disk-recovery commands "
+		       "on the receiving machine.")
+	else:
+		why = "The mount command failed: " + (err.strip() or out.strip() or "unknown error") + "."
+	details = details + why
+	html = html + ("<b>&#9888; BACKUP SKIPPED</b> &mdash; the backup drive was NOT mounted on the Receiver "
+	        "and could not be remounted automatically. The sync was deliberately skipped to avoid writing "
+	        "into the unmounted mount point on the Receiver's root filesystem (which would silently fill "
+	        "it). No files were backed up this run. " + why + "</p>\n")
+	return ['blocked', details, html]
+
+#Atomic, conservative backup-drive recovery, called only when rsync has failed.
+#Detects the specific, safely-repairable filesystem faults we saw in the wild
+#(ext4 directory checksum corruption -> rsync "Bad message (74)", and read-only
+#remounts), and repairs them via: umount -> e2fsck -D -f -y -> mount, all over
+#SSH as 'sudo -n'. Refuses to act on suspected hardware failure or a full disk,
+#and only ever touches a mount point that /etc/fstab explicitly declares.
+#Returns [outcome, details, html] where outcome is one of:
+#  not_applicable | repaired | permission_denied | skipped_unsafe | failed
+def repairRemoteBackupDrive(failure_text):
+	details = ""
+	html = "<p>\n"
+
+	if not _autofix_enabled():
+		msg = "Filesystem auto-repair is disabled in the config (autofix_filesystem)."
+		return ['not_applicable', msg, html + msg + "</p>\n"]
+
+	#Guardrail: never auto-fix suspected failing hardware or a full disk.
+	if 'Input/output error' in failure_text or 'No space left on device' in failure_text:
+		msg = ("Detected a possible hardware failure (I/O error) or a full disk on the backup drive. "
+		       "Refusing to auto-repair, because running e2fsck on failing hardware, or deleting files "
+		       "to free a full disk, could be destructive. Manual attention required.")
+		return ['skipped_unsafe', msg, html + msg + "</p>\n"]
+
+	#Only act on the known, safely-repairable signatures.
+	if not ('Bad message (74)' in failure_text or 'Read-only file system' in failure_text):
+		msg = "The rsync failure did not match a repairable filesystem signature; taking no action."
+		return ['not_applicable', msg, html + msg + "</p>\n"]
+
+	#Resolve the device strictly from /etc/fstab, so we only ever touch a declared mount point.
+	mountpoint, device = _resolve_backup_drive()
+	if mountpoint is None or device is None:
+		msg = ("Could not resolve an /etc/fstab-managed device for the configured backup directory; "
+		       "refusing to run a filesystem repair on an undeclared mount point.")
+		return ['not_applicable', msg, html + msg + "</p>\n"]
+
+	details = details + "Detected a repairable filesystem error on " + device + " (mounted at " + mountpoint + ").\n"
+
+	#Step 1: unmount.
+	rc, out, err = _remote_ssh("sudo -n umount " + mountpoint)
+	if _is_sudo_permission_error(rc, err):
+		return _repair_permission_denied(details, html)
+	if rc != 0:
+		details = details + "umount failed (exit " + str(rc) + "): " + (err.strip() or out.strip()) + "\n"
+		return ['failed', details.strip('\n'), html + details.replace('\n', '<br />') + "</p>\n"]
+
+	#Step 2: filesystem check + repair (also rebuilds oversized dir indexes via -D).
+	rc, out, err = _remote_ssh("sudo -n e2fsck -D -f -y " + device)
+	fsck_output = (out + "\n" + err).strip()
+	if _is_sudo_permission_error(rc, err):
+		return _repair_permission_denied(details, html)
+	#e2fsck exit: 0 = clean, 1/2 = errors corrected (success); >= 4 = uncorrected/failure.
+	if rc >= 4:
+		details = details + "e2fsck failed (exit " + str(rc) + "):\n" + fsck_output + "\n"
+		_remote_ssh("sudo -n mount " + mountpoint)  #best-effort: don't leave the drive unmounted
+		return ['failed', details.strip('\n'), html + details.replace('\n', '<br />') + "</p>\n"]
+
+	#Step 3: remount.
+	rc, out, err = _remote_ssh("sudo -n mount " + mountpoint)
+	if _is_sudo_permission_error(rc, err):
+		return _repair_permission_denied(details, html)
+	if rc != 0:
+		details = details + "Remount failed after e2fsck (exit " + str(rc) + "): " + (err.strip() or out.strip()) + "\n"
+		return ['failed', details.strip('\n'), html + details.replace('\n', '<br />') + "</p>\n"]
+
+	#Verify it came back mounted read-write.
+	rc, mout, _  = _remote_ssh("mountpoint -q " + mountpoint + " && echo MOUNTED || echo UNMOUNTED")
+	rc2, opts, _ = _remote_ssh("findmnt -n -o OPTIONS --target " + mountpoint)
+	if 'MOUNTED' not in mout:
+		details = details + "Repair completed but the drive is not mounted afterwards.\n"
+		return ['failed', details.strip('\n'), html + details.replace('\n', '<br />') + "</p>\n"]
+	if 'ro' in opts.strip().split(','):
+		details = details + "Repair completed but the drive remounted read-only.\n"
+		return ['failed', details.strip('\n'), html + details.replace('\n', '<br />') + "</p>\n"]
+
+	details = (details + "Ran umount -> e2fsck -D -f -y -> mount. Drive remounted read-write.\n"
+	           + "e2fsck output:\n" + fsck_output + "\n")
+	html = (html + "Auto-repair succeeded: ran <code>umount</code> &rarr; <code>e2fsck -D -f -y</code> &rarr; "
+	        "<code>mount</code> on " + device + " (" + mountpoint + "). Drive remounted read-write.</p>\n")
+	return ['repaired', details.strip('\n'), html]
 
 #Generate and send the Email
 def sendEmail(overview, body, log_file_attachments):
