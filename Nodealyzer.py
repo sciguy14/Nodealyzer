@@ -7,7 +7,7 @@
 # License: GPL v3 (http://www.gnu.org/licenses/gpl.html)
 
 #Import needed libraries
-import ConfigParser, pyzmail, base64, datetime, time, os, re, pprint, subprocess, gzip, sys, shutil, glob
+import ConfigParser, pyzmail, base64, datetime, time, os, re, pprint, subprocess, gzip, sys, shutil, glob, tempfile, urllib2
 
 #Know Script Directory so we can make absolute references
 script_dir = os.path.dirname(os.path.realpath(__file__))
@@ -16,10 +16,21 @@ script_dir = os.path.dirname(os.path.realpath(__file__))
 config = ConfigParser.ConfigParser()
 config.read(script_dir + "/config.ini")
 
+#SSH options for every connection to the Receiver: never prompt (cron has no TTY),
+#never trust an unknown host key, and detect a dead link instead of hanging forever.
+SSH_OPTS = ('-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 '
+            '-o ServerAliveInterval=30 -o ServerAliveCountMax=4')
+
+#Max rsync error lines included in the emailed report (the rest are counted, not shown).
+RSYNC_ERR_MAX_LINES = 40
+
 #Main program execution
 def main():
 
         print "\nNodealyzer is taking care of business! Stand by, this shouldn't take long...\n"
+
+        #Dead-man's switch: tell the monitor a run has started (no-op if not configured).
+        pingHealthcheck('/start')
 
 	#Perform Preflight Checks
 	#print "Performing Preflight Checks..."
@@ -164,14 +175,41 @@ def main():
                 status_reports = status_reports + "\t<tr align='right'><td>Remote Data Backup:</td>" + SKIPPED_STYLED + "</tr>\n"
                 all_good = False
         else:
+                #Pre-flight filesystem health check: if the Receiver's kernel has already
+                #flagged the backup filesystem as having errors, repair it BEFORE syncing.
+                #A corrupted drive makes rsync emit huge volumes of errors and leaves
+                #directories un-backed-up, so fix first rather than after the fact.
+                sys.stdout.write("Checking the backup drive's filesystem health on the Receiver...")
+                [repair_outcome, preflight_details, repair_html] = preflightRemoteDriveHealth()
+                print repair_outcome
+                print preflight_details
+                if repair_outcome == 'healthy':
+                        repair_outcome = 'not_needed'
+                        repair_html = ""
+
+                #A repair attempt that went wrong part-way could leave the drive unmounted.
+                #Re-run the mount gate so we never rsync into the bare mount point.
+                skip_sync = False
+                if repair_outcome not in ('not_needed', 'not_applicable', 'repaired'):
+                        [mount_outcome, mount_details, mount_html] = ensureRemoteDriveMounted()
+                        print mount_details
+                        if mount_outcome == 'blocked':
+                                skip_sync = True
+
                 #Let's Syncronize!
-                sys.stdout.write("Performing Remote Sync...")
-                [success, details, html] = rsync()
+                if skip_sync:
+                        print "Backup drive not mounted after a failed repair - skipping the sync!"
+                        success = False
+                        details = mount_details
+                        html = "<p><b>&#9888; BACKUP SKIPPED</b> &mdash; the drive repair failed and the drive is not mounted. " + mount_html
+                else:
+                        sys.stdout.write("Performing Remote Sync...")
+                        [success, details, html] = rsync()
 
                 #If rsync failed, see whether it's a filesystem error we can safely auto-repair.
-                repair_outcome = 'not_needed'
-                repair_html = ""
-                if not success:
+                #(Fallback for corruption the kernel hadn't flagged yet. Skipped if the
+                #pre-flight already attempted a repair this run.)
+                if not success and repair_outcome in ('not_needed', 'not_applicable'):
                         sys.stdout.write("rsync reported errors; checking for an auto-repairable drive fault...")
                         [repair_outcome, repair_details, repair_html] = repairRemoteBackupDrive(details)
                         print repair_outcome
@@ -240,7 +278,15 @@ def main():
         status_reports = status_reports + "</ul>"
 	sys.stdout.write("Sending Email report...")
 	#TODO: More generic file attach for logs
-	print sendEmail(status_reports, email_body, log_file_attachments)
+	email_result = sendEmail(status_reports, email_body, log_file_attachments)
+	print email_result
+
+        #Dead-man's switch: report success only if the backup was clean AND the email
+        #went out. Anything else pings /fail so the monitor alerts immediately.
+        if all_good and email_result == 'Success!':
+                pingHealthcheck('')
+        else:
+                pingHealthcheck('/fail', "all_good=" + str(all_good) + " email=" + str(email_result))
 
         print ""
         print "All Done!"
@@ -456,9 +502,14 @@ def rsync():
                '--delete '
                '--exclude-from=' + script_dir + '/rsync_exclusions.txt ' + ' '
                '--log-file=' + script_dir + '/rsync.log '
-               '-e "ssh -l ' + b_user + ' -p ' + b_port + '" '
+               '--timeout=600 '
+               '-e "ssh -l ' + b_user + ' -p ' + b_port + ' ' + SSH_OPTS + '" '
                '' + b_ldir + ' ' + b_fqdn + ':' + b_rdir)
-        p1 = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        #stderr goes to a temp FILE, not a pipe. With a pipe, rsync blocks forever once
+        #it writes >64KB of errors (e.g. thousands of "Bad message (74)" lines from a
+        #corrupted Receiver drive) because we only drain stdout below.
+        err_file = tempfile.TemporaryFile()
+        p1 = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=err_file)
         # Poll process for new output until finished
         save_output = False
         stats = ""
@@ -473,10 +524,19 @@ def rsync():
                 else:
                         sys.stdout.write(nextline)
                         sys.stdout.flush()
-        err = p1.communicate()[1]
-        if p1.returncode is not 0:
-                details = details + err
-                html = html + err.replace('\n','<br />')
+        p1.wait()
+        err_file.seek(0)
+        err = err_file.read()
+        err_file.close()
+        if p1.returncode != 0:
+                #Keep the report readable: a corrupted drive can produce thousands of lines.
+                err_lines = err.strip('\n').split('\n')
+                if len(err_lines) > RSYNC_ERR_MAX_LINES:
+                        omitted = len(err_lines) - RSYNC_ERR_MAX_LINES
+                        err = '\n'.join(err_lines[:RSYNC_ERR_MAX_LINES] + err_lines[-1:]) + \
+                              "\n[... " + str(omitted - 1) + " more error lines omitted ...]\n"
+                details = details + "rsync exited with code " + str(p1.returncode) + ":\n" + err
+                html = html + ("rsync exited with code " + str(p1.returncode) + ":<br />" + err).replace('\n','<br />')
                 all_success = False
         else:
                 details = details + "\n" + stats
@@ -496,9 +556,7 @@ def _remote_ssh(command):
 	b_user = config.get('RSync','backup_server_username')
 	b_port = config.get('RSync','backup_server_ssh_port')
 	b_fqdn = config.get('RSync','backup_server_fqdn')
-	cmd = ['ssh', '-l', b_user, '-p', str(b_port),
-	       '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15',
-	       b_fqdn, command]
+	cmd = ['ssh', '-l', b_user, '-p', str(b_port)] + SSH_OPTS.split() + [b_fqdn, command]
 	p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 	out, err = p.communicate()
 	return (p.returncode, out, err)
@@ -625,7 +683,70 @@ def repairRemoteBackupDrive(failure_text):
 		return ['not_applicable', msg, html + msg + "</p>\n"]
 
 	details = details + "Detected a repairable filesystem error on " + device + " (mounted at " + mountpoint + ").\n"
+	return _runRemoteDriveRepair(mountpoint, device, details, html)
 
+#Did the Receiver's kernel log I/O errors for this device since boot? That points
+#at failing hardware (or a flaky USB link), where e2fsck could make things worse.
+def _remote_device_has_io_errors(device):
+	disk = os.path.basename(device).rstrip('0123456789')  #/dev/sda1 -> sda
+	rc, out, err = _remote_ssh("sudo -n dmesg | grep -E 'I/O error.*dev " + disk + "' | tail -3")
+	return out.strip()
+
+#Pre-flight health check, run before rsync. Reads the ext4 superblock on the
+#Receiver (read-only, safe while mounted). If the kernel has flagged the
+#filesystem with errors, runs the same umount -> e2fsck -> mount repair used for
+#rsync failures. Returns [outcome, details, html] where outcome is one of:
+#  healthy | not_applicable | repaired | permission_denied | skipped_unsafe | failed
+def preflightRemoteDriveHealth():
+	details = ""
+	html = "<p>\n"
+
+	if not _autofix_enabled():
+		return ['not_applicable', "Filesystem auto-repair is disabled in the config (autofix_filesystem).", ""]
+
+	mountpoint, device = _resolve_backup_drive()
+	if mountpoint is None or device is None:
+		msg = ("Could not resolve an /etc/fstab-managed device for the configured backup directory; "
+		       "skipping the filesystem health check.")
+		return ['not_applicable', msg, html + msg + "</p>\n"]
+
+	rc, out, err = _remote_ssh("sudo -n dumpe2fs -h " + device + " 2>/dev/null")
+	if _is_sudo_permission_error(rc, err):
+		return _repair_permission_denied("Could not read the filesystem state on " + device + ".\n", html)
+	state = ""
+	error_count = 0
+	for line in out.split('\n'):
+		if line.startswith('Filesystem state:'):
+			state = line.split(':', 1)[1].strip()
+		elif line.startswith('FS Error count:'):
+			try:
+				error_count = int(line.split(':', 1)[1].strip())
+			except ValueError:
+				pass
+	if not state:
+		msg = "Could not read the filesystem state on " + device + " (dumpe2fs exit " + str(rc) + "); skipping the health check."
+		return ['not_applicable', msg, html + msg + "</p>\n"]
+
+	if 'error' not in state:
+		return ['healthy', "Filesystem on " + device + " is healthy (state: " + state + ").", ""]
+
+	details = (details + "Filesystem on " + device + " (" + mountpoint + ") is flagged with errors before the sync "
+	           + "(state: " + state + ", " + str(error_count) + " errors logged).\n")
+
+	#Guardrail: never auto-fix suspected failing hardware.
+	io_errors = _remote_device_has_io_errors(device)
+	if io_errors:
+		msg = ("The Receiver's kernel logged I/O errors for this disk since boot, which suggests failing "
+		       "hardware or a bad USB link. Refusing to auto-repair, because running e2fsck on failing "
+		       "hardware could be destructive. Manual attention required.\n" + io_errors)
+		details = details + msg
+		return ['skipped_unsafe', details.strip('\n'), html + details.replace('\n', '<br />') + "</p>\n"]
+
+	return _runRemoteDriveRepair(mountpoint, device, details, html)
+
+#The repair itself: umount -> e2fsck -D -f -y -> mount, then verify read-write.
+#Shared by the pre-flight check and the post-rsync-failure fallback.
+def _runRemoteDriveRepair(mountpoint, device, details, html):
 	#Step 1: unmount.
 	rc, out, err = _remote_ssh("sudo -n umount " + mountpoint)
 	if _is_sudo_permission_error(rc, err):
@@ -723,6 +844,29 @@ def sendEmail(overview, body, log_file_attachments):
 		return 'Error:', ret
 	
 	
+#Dead-man's switch ping (healthchecks.io-style). suffix is '' for success,
+#'/start' at the beginning of a run, or '/fail' for a failed run. If no success
+#ping arrives on schedule, the monitoring service alerts the owner, which catches
+#hangs, crashes, broken email and a dead server alike. Optional: does nothing
+#unless [Monitoring] healthcheck_url is set. Never raises.
+def pingHealthcheck(suffix, message=''):
+	if not config.has_option('Monitoring', 'healthcheck_url'):
+		return
+	url = config.get('Monitoring', 'healthcheck_url').strip().rstrip('/')
+	if not url:
+		return
+	try:
+		urllib2.urlopen(url + suffix, data=(message[:10000] if message else None), timeout=15).read()
+	except Exception as e:
+		print "Healthcheck ping" + (suffix or '') + " failed: " + str(e)
+
 #Run the Main function when this python script is executed
 if __name__ == '__main__':
-	main()
+	try:
+		main()
+	except Exception:
+		import traceback
+		tb = traceback.format_exc()
+		print tb
+		pingHealthcheck('/fail', tb)
+		raise
