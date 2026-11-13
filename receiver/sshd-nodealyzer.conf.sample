@@ -1,0 +1,20 @@
+# Copy to /etc/ssh/sshd_config.d/50-nodealyzer.conf on the Receiver and edit.
+# On Debian/Ubuntu, sshd_config.d is included BEFORE the main file and the first
+# value wins, so these override the defaults. Verify with: sudo sshd -T
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+MaxAuthTries 3
+# ADMIN_USER may log in from your LAN only; the backup user from the Server's IP only.
+# Add an IPv6 entry (e.g. ADMIN_USER@2001:db8:1:2::/64) if you SSH in over IPv6.
+AllowUsers ADMIN_USER@192.0.2.0/24 nodealyzer@SERVER_IP
+
+Match User nodealyzer
+    AllowTcpForwarding no
+    AllowAgentForwarding no
+    AllowStreamLocalForwarding no
+    X11Forwarding no
+    PermitTunnel no
+    PermitTTY no
+    ForceCommand /usr/local/sbin/nodealyzer-gate
+Match all

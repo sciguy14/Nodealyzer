@@ -1,0 +1,67 @@
+#!/bin/bash
+# nodealyzer-gate: install as /usr/local/sbin/nodealyzer-gate (root:root 755)
+#
+# Forced command for the Server's SSH key on the Receiver. Nodealyzer may ONLY:
+#   1. push files with rsync into BACKUP_DIR (via rrsync -wo), and
+#   2. run the fixed drive check/repair commands described in the README
+#      ("Backup Drive Auto-Recovery").
+# Anything else is refused and logged (journalctl -t nodealyzer-gate).
+#
+# Site-specific values are read from /etc/nodealyzer-gate.conf (root-owned; see
+# nodealyzer-gate.conf.sample). The config is parsed, never sourced, and the
+# incoming command string is never passed to a shell: each allowed string is
+# matched exactly, then executed with hard-coded arguments.
+
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+CONF=/etc/nodealyzer-gate.conf
+CMD="${SSH_ORIGINAL_COMMAND-}"
+
+log() { logger -t nodealyzer-gate -- "$*"; }
+die() { log "CONFIG ERROR: $*"; echo "nodealyzer-gate: misconfigured on the Receiver" >&2; exit 125; }
+
+conf_get() {  # conf_get KEY -> value of the last KEY=value line, surrounding quotes stripped
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$CONF" | tail -n 1 | sed 's/^["'\'']//; s/["'\'']$//; s/[[:space:]]*$//'
+}
+
+[ -f "$CONF" ] || die "$CONF not found"
+[ "$(stat -c %u "$CONF")" = 0 ] || die "$CONF must be owned by root"
+[ $(( 0$(stat -c %a "$CONF") & 022 )) -eq 0 ] || die "$CONF must not be group/world writable"
+
+DIR=$(conf_get BACKUP_DIR)
+DEV=$(conf_get BACKUP_DEV)
+[[ "$DIR" =~ ^/[A-Za-z0-9._/-]+$ && "$DIR" != */ && "$DIR" != *..* ]] || die "BACKUP_DIR must be an absolute path without spaces, '..' or a trailing slash"
+[[ "$DEV" =~ ^/dev/[A-Za-z0-9._/-]+$ && "$DEV" != *..* ]] || die "BACKUP_DEV must be a /dev/... path"
+DISK=$(basename "$DEV"); DISK=${DISK%"${DISK##*[!0-9]}"}   # /dev/sdb1 -> sdb (same rule Nodealyzer uses)
+
+case "$CMD" in
+  "rsync --server "*)
+    # rrsync re-reads SSH_ORIGINAL_COMMAND and rejects --sender (reads) under -wo.
+    # -absolute: Nodealyzer passes the absolute path from backup_server_remote_directory.
+    exec /usr/bin/rrsync -wo -absolute "$DIR"
+    ;;
+  "findmnt --fstab -n -o TARGET --target $DIR")
+    exec findmnt --fstab -n -o TARGET --target "$DIR" ;;
+  "findmnt --fstab -n -o SOURCE --target $DIR")
+    exec findmnt --fstab -n -o SOURCE --target "$DIR" ;;
+  "findmnt -n -o OPTIONS --target $DIR")
+    exec findmnt -n -o OPTIONS --target "$DIR" ;;
+  "mountpoint -q $DIR && echo MOUNTED || echo UNMOUNTED")
+    if mountpoint -q "$DIR"; then echo MOUNTED; else echo UNMOUNTED; fi
+    exit 0 ;;
+  "sudo -n mount $DIR")
+    log "mount $DIR"; exec sudo -n /usr/bin/mount "$DIR" ;;
+  "sudo -n umount $DIR")
+    log "umount $DIR"; exec sudo -n /usr/bin/umount "$DIR" ;;
+  "sudo -n dumpe2fs -h $DEV 2>/dev/null")
+    exec sudo -n /usr/sbin/dumpe2fs -h "$DEV" 2>/dev/null ;;
+  "sudo -n e2fsck -D -f -y $DEV")
+    log "e2fsck -D -f -y $DEV"; exec sudo -n /usr/sbin/e2fsck -D -f -y "$DEV" ;;
+  "sudo -n dmesg | grep -E 'I/O error.*dev $DISK' | tail -3")
+    sudo -n /usr/bin/dmesg | grep -E "I/O error.*dev $DISK" | tail -3
+    exit 0 ;;
+  *)
+    log "REFUSED from ${SSH_CLIENT%% *}: ${CMD:0:200}"
+    echo "nodealyzer-gate: command not permitted" >&2
+    exit 126 ;;
+esac

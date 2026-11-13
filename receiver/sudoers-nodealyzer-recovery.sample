@@ -1,0 +1,5 @@
+# Copy to /etc/sudoers.d/nodealyzer-recovery on the Receiver, replace BACKUP_DIR and
+# /dev/sdX1 with the values from /etc/nodealyzer-gate.conf, then check it:
+#   sudo visudo -cf /etc/sudoers.d/nodealyzer-recovery   (root:root 440)
+# Only these exact command lines are allowed, nothing else.
+nodealyzer ALL=(root) NOPASSWD: /usr/bin/mount BACKUP_DIR, /usr/bin/umount BACKUP_DIR, /usr/sbin/e2fsck -D -f -y /dev/sdX1, /usr/sbin/dumpe2fs -h /dev/sdX1, /usr/bin/dmesg ""
