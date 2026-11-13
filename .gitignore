@@ -3,3 +3,6 @@ email_template.html
 legacy/*
 notes.txt
 rsync_exclusions.txt
+# Local copies of site-specific Receiver config (commit only the .sample files)
+receiver/*.conf
+receiver/sudoers-nodealyzer-recovery

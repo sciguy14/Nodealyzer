@@ -104,6 +104,10 @@ with contents like:
 
 	USER ALL=(root) NOPASSWD: /usr/bin/umount, /usr/bin/mount, /usr/sbin/e2fsck, /usr/sbin/dumpe2fs, /usr/bin/dmesg
 
+If you use the locked-down receiver account (below), use
+`receiver/sudoers-nodealyzer-recovery.sample` instead. It allows those commands only with
+the exact arguments Nodealyzer uses.
+
 (`dumpe2fs` is for the pre-flight health check. `dmesg` lets Nodealyzer refuse to
 auto-repair when the kernel has logged I/O errors for the disk, which points to
 failing hardware.)
@@ -122,6 +126,64 @@ the entry once, and check its fingerprint against the Receiver's own key first:
 	ssh-keyscan -p PORT HOSTNAME | ssh-keygen -lf -          # on the Server
 	ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub           # on the Receiver; must match
 	ssh-keyscan -p PORT HOSTNAME >> ~/.ssh/known_hosts       # only if it matches
+
+
+Locked-Down Receiver Account (Recommended)
+------------------------------------------
+Don't let the Server log into the Receiver as a personal or sudo-capable
+account. The Server's key has no passphrase (cron needs it that way), so
+whoever gets the Server gets that account. Instead, use a dedicated user that
+can only push files into the backup directory and run the fixed drive-recovery
+commands above. The files are in `receiver/`:
+
+| File | Install to (on the Receiver) |
+|---|---|
+| `receiver/nodealyzer-gate` | `/usr/local/sbin/nodealyzer-gate` (root:root 755). Install as-is, no edits. |
+| `receiver/nodealyzer-gate.conf.sample` | `/etc/nodealyzer-gate.conf` (root:root 644). Set `BACKUP_DIR` and `BACKUP_DEV`. |
+| `receiver/sudoers-nodealyzer-recovery.sample` | `/etc/sudoers.d/nodealyzer-recovery` (root:root 440). Replace the placeholders. |
+| `receiver/sshd-nodealyzer.conf.sample` | `/etc/ssh/sshd_config.d/50-nodealyzer.conf` (root:root 644). Replace the placeholders. |
+
+All machine-specific values go in those installed copies on the Receiver, never
+in this repo. `.gitignore` excludes local non-`.sample` copies under
+`receiver/`. The gate refuses to run if `/etc/nodealyzer-gate.conf` is missing,
+not owned by root, writable by group or others, or has an invalid value.
+
+The gate matches each incoming command string **exactly** and runs it with
+hard-coded arguments. It never passes the incoming string to a shell. rsync is
+sent to `rrsync -wo -absolute BACKUP_DIR` (rsync 3.2.4+ ships `/usr/bin/rrsync`):
+
+* `-wo` (write-only) is enough because Nodealyzer only pushes. `--delete` is a
+  receiver-side action, so it still works. Pulls (`--sender`) are refused.
+* `-absolute` lets Nodealyzer keep using the absolute path in
+  `backup_server_remote_directory`. The recovery code also needs that path for
+  `findmnt`. Paths outside `BACKUP_DIR` and paths containing `..` are rejected.
+
+If you change the rsync flags or add a new remote command to `Nodealyzer.py`,
+add it to the gate too, or it will be refused. Refusals are logged on the
+Receiver: `journalctl -t nodealyzer-gate`.
+
+Setup (on the Receiver, as an admin):
+
+	sudo useradd --system --create-home --home-dir /var/lib/nodealyzer --shell /bin/sh nodealyzer
+	sudo install -o root -g root -m 755 receiver/nodealyzer-gate /usr/local/sbin/nodealyzer-gate
+	sudo install -o root -g root -m 644 receiver/nodealyzer-gate.conf.sample /etc/nodealyzer-gate.conf
+	sudoedit /etc/nodealyzer-gate.conf                  # set BACKUP_DIR and BACKUP_DEV
+	sudo install -d -o root -g root -m 755 /var/lib/nodealyzer/.ssh
+	# one line, with the Server's public key and IP:
+	echo 'from="SERVER_IP",restrict,command="/usr/local/sbin/nodealyzer-gate" ssh-ed25519 AAAA... server' \
+	  | sudo tee /var/lib/nodealyzer/.ssh/authorized_keys
+	sudo chown -R nodealyzer:nodealyzer BACKUP_DIR      # the backup tree must be owned by the new user
+	sudo sshd -t && sudo systemctl reload ssh
+
+The shell must be a real shell (`/bin/sh`), not `nologin`, because sshd runs the
+forced command through the user's shell. The forced command keeps it from ever
+being an interactive shell. Don't put `BACKUP_DIR` inside a `700` home
+directory, because the new user can't get into it there. Then set
+`backup_server_username` and `backup_server_remote_directory` in `config.ini`.
+
+Note: rsync runs as a non-root user here, so it can't preserve file owners or
+groups. Everything on the Receiver is owned by the backup user. File modes and
+timestamps are still kept.
 
 
 Dead-Man's Switch (Optional, Recommended)

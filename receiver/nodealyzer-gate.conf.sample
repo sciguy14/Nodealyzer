@@ -1,0 +1,10 @@
+# Copy to /etc/nodealyzer-gate.conf on the Receiver (root:root 644) and edit.
+# Read by /usr/local/sbin/nodealyzer-gate. Plain KEY=value lines only (not sourced).
+
+# Absolute backup mount point. Must equal backup_server_remote_directory in the
+# Server's config.ini, and must be an fstab-managed mount.
+BACKUP_DIR=/srv/nodealyzer-backup
+
+# Block device for that mount, exactly as findmnt reports it:
+#   findmnt --fstab -n -o SOURCE --target BACKUP_DIR
+BACKUP_DEV=/dev/sdX1
